@@ -8,6 +8,8 @@ import android.content.pm.PackageManager;
 import android.location.Location;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.PowerManager;
 import android.util.Log;
 
@@ -25,7 +27,6 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class ShelterHelper {
-    public static final String DEFAULT_NAVIGATION_URI = "google.navigation:q=shelter";
     private static final String TAG = "ShelterHelper";
     private static List<Shelter> cachedShelters = null;
 
@@ -37,12 +38,13 @@ public class ShelterHelper {
             String line;
             reader.readLine(); // skip header
             while ((line = reader.readLine()) != null) {
+                if (line.trim().isEmpty()) continue;
                 String[] parts = line.split(",");
                 if (parts.length >= 3) {
                     try {
-                        double lat = Double.parseDouble(parts[1]);
-                        double lng = Double.parseDouble(parts[2]);
-                        String address = parts.length > 3 ? parts[3] : "Unknown";
+                        double lat = Double.parseDouble(parts[1].trim());
+                        double lng = Double.parseDouble(parts[2].trim());
+                        String address = parts.length > 3 ? parts[3].trim() : "Unknown";
                         shelters.add(new Shelter(lat, lng, address));
                     } catch (NumberFormatException e) {
                         Log.w(TAG, "Skipping invalid CSV line: " + line);
@@ -58,10 +60,8 @@ public class ShelterHelper {
 
     public static Shelter findNearest(Location currentLoc, List<Shelter> shelters) {
         if (shelters == null || shelters.isEmpty() || currentLoc == null) return null;
-
         Shelter nearest = null;
         float minDistance = Float.MAX_VALUE;
-
         for (Shelter s : shelters) {
             float[] results = new float[1];
             Location.distanceBetween(currentLoc.getLatitude(), currentLoc.getLongitude(), s.lat, s.lng, results);
@@ -78,95 +78,123 @@ public class ShelterHelper {
             List<Shelter> shelters = loadSheltersFromCsv(context);
             Shelter nearest = findNearest(location, shelters);
             if (nearest != null) {
-                return "google.navigation:q=" + nearest.lat + "," + nearest.lng;
+                Log.i(TAG, "Found target: " + nearest.lat + "," + nearest.lng);
+                return "google.navigation:q=" + nearest.lat + "," + nearest.lng + "&mode=w";
             }
         }
-        return DEFAULT_NAVIGATION_URI;
+        return "google.navigation:q=shelter&mode=w";
     }
 
     public static void startNavigationFlow(Context context) {
+        // Use a wakelock to ensure the CPU stays alive while fetching location
+        PowerManager pm = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
+        PowerManager.WakeLock wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "NearbyShelter:LocationLock");
+        wl.acquire(10000);
+
         fetchNearestShelterUri(context, uri -> {
-            Intent intent = new Intent(context, NavigationTrampolineActivity.class);
-            intent.putExtra("destination", uri);
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-            context.startActivity(intent);
+            try {
+                Intent intent = new Intent(context, NavigationTrampolineActivity.class);
+                intent.putExtra("destination", uri);
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                context.startActivity(intent);
+            } finally {
+                if (wl.isHeld()) wl.release();
+            }
         });
     }
 
-    public static void launchNearestShelter(Activity activity, String fallbackUri) {
-        fetchNearestShelterUri(activity, uri -> {
-            String finalUri = (uri.equals(DEFAULT_NAVIGATION_URI) && fallbackUri != null) ? fallbackUri : uri;
+    public static void launchNearestShelter(Activity activity, String destinationUri) {
+        if (destinationUri != null) {
+            performLaunch(activity, destinationUri);
+        } else {
+            fetchNearestShelterUri(activity, uri -> performLaunch(activity, uri));
+        }
+    }
 
-            Uri navUri = Uri.parse(finalUri);
-            Intent mapIntent = new Intent(Intent.ACTION_VIEW, navUri);
-            mapIntent.setPackage("com.google.android.apps.maps");
-            mapIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+    private static void performLaunch(Activity activity, String uriString) {
+        new Handler(Looper.getMainLooper()).post(() -> {
             try {
-                activity.startActivity(mapIntent);
+                // Ensure screen wakes up and CPU stays alive during the sequence
+                PowerManager pm = (PowerManager) activity.getSystemService(Context.POWER_SERVICE);
+                PowerManager.WakeLock wl = pm.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP, "NearbyShelter:IntentLaunchLock");
+                wl.acquire(5000);
+
+                Log.i(TAG, "Starting 3-step launch sequence for: " + uriString);
+
+                // STEP 1: Bring Google Maps app to foreground
+                Intent step1 = activity.getPackageManager().getLaunchIntentForPackage("com.google.android.apps.maps");
+                if (step1 != null) {
+                    step1.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    activity.startActivity(step1);
+                }
+
+                // STEP 2: Pre-center the map on the coordinates
+                new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                    try {
+                        String coords = uriString.replace("google.navigation:q=", "").split("&")[0];
+                        Log.i(TAG, "Step 2: Pre-centering on " + coords);
+                        Intent step2 = new Intent(Intent.ACTION_VIEW, Uri.parse("geo:" + coords + "?z=17"));
+                        step2.setPackage("com.google.android.apps.maps");
+                        step2.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        activity.startActivity(step2);
+                    } catch (Exception e) { Log.e(TAG, "Step 2 failed", e); }
+                }, 600);
+
+                // STEP 3: Start the actual turn-by-turn navigation
+                new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                    try {
+                        Log.i(TAG, "Step 3: Delivering Navigation Intent");
+                        Intent step3 = new Intent(Intent.ACTION_VIEW, Uri.parse(uriString));
+                        step3.setPackage("com.google.android.apps.maps");
+                        step3.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        activity.startActivity(step3);
+                        
+                        if (wl.isHeld()) wl.release();
+                        // Delay finishing the bridge activity
+                        new Handler(Looper.getMainLooper()).postDelayed(activity::finish, 3000);
+                    } catch (Exception e) {
+                        Log.e(TAG, "Step 3 failed", e);
+                        if (wl.isHeld()) wl.release();
+                        activity.finish();
+                    }
+                }, 1200);
+
             } catch (Exception e) {
-                Log.e(TAG, "Failed to launch maps", e);
-                Intent fallback = new Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q=shelter"));
-                fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                activity.startActivity(fallback);
+                Log.e(TAG, "Handover sequence crashed", e);
+                activity.finish();
             }
-            activity.finish();
         });
     }
 
     private static void fetchNearestShelterUri(Context context, UriCallback callback) {
-        PowerManager pm = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
-        PowerManager.WakeLock wakeLock = null;
-        if (pm != null) {
-            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "NearbyShelter:WakeLock");
-            wakeLock.acquire(15000);
-        }
-
         try {
-            boolean hasFineLocation = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED;
-            boolean hasBackgroundLocation = true;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                hasBackgroundLocation = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED;
-            }
-
-            if (!hasFineLocation || !hasBackgroundLocation) {
-                Log.e(TAG, "Permissions missing. Fine: " + hasFineLocation + ", Background: " + hasBackgroundLocation);
-                callback.onUriReady(DEFAULT_NAVIGATION_URI);
-                if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                callback.onUriReady("google.navigation:q=shelter&mode=w");
                 return;
             }
 
             FusedLocationProviderClient client = LocationServices.getFusedLocationProviderClient(context);
-            CancellationTokenSource cts = new CancellationTokenSource();
             CurrentLocationRequest request = new CurrentLocationRequest.Builder()
                     .setPriority(Priority.PRIORITY_HIGH_ACCURACY)
-                    .setMaxUpdateAgeMillis(10000)
+                    .setMaxUpdateAgeMillis(30000)
                     .build();
 
-            PowerManager.WakeLock finalWakeLock = wakeLock;
-            client.getCurrentLocation(request, cts.getToken()).addOnCompleteListener(task -> {
+            client.getCurrentLocation(request, new CancellationTokenSource().getToken()).addOnCompleteListener(task -> {
                 new Thread(() -> {
                     try {
                         Location location = task.isSuccessful() ? task.getResult() : null;
-                        String uri = getNearestShelterUri(context, location);
-                        callback.onUriReady(uri);
-                    } catch (Exception e) {
-                        Log.e(TAG, "Error processing location", e);
-                        callback.onUriReady(DEFAULT_NAVIGATION_URI);
-                    } finally {
-                        if (finalWakeLock != null && finalWakeLock.isHeld()) {
-                            finalWakeLock.release();
+                        if (location == null) {
+                            client.getLastLocation().addOnSuccessListener(lastLoc -> callback.onUriReady(getNearestShelterUri(context, lastLoc)));
+                        } else {
+                            callback.onUriReady(getNearestShelterUri(context, location));
                         }
+                    } catch (Exception e) {
+                        callback.onUriReady("google.navigation:q=shelter&mode=w");
                     }
                 }).start();
             });
-        } catch (SecurityException e) {
-            Log.e(TAG, "SecurityException", e);
-            callback.onUriReady(DEFAULT_NAVIGATION_URI);
-            if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
         } catch (Exception e) {
-            Log.e(TAG, "Unexpected error", e);
-            callback.onUriReady(DEFAULT_NAVIGATION_URI);
-            if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+            callback.onUriReady("google.navigation:q=shelter&mode=w");
         }
     }
 
@@ -178,7 +206,6 @@ public class ShelterHelper {
         public double lat;
         public double lng;
         public String address;
-
         public Shelter(double lat, double lng, String address) {
             this.lat = lat;
             this.lng = lng;

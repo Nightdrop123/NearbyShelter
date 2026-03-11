@@ -1,5 +1,7 @@
 package com.moko.nearbyshelter;
 
+import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
@@ -31,11 +33,11 @@ public class AlertListener extends NotificationListenerService {
             "דיווח"
     };
 
+    // Debug trigger to test map opening without real alerts
+    private static final String DEBUG_TRIGGER_TEXT = "debug_open_shelter";
+
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
-        String pkg = sbn.getPackageName();
-        if (!PIKUD_HAOREF_PACKAGES.contains(pkg)) return;
-
         String title = "";
         String text = "";
         if (sbn.getNotification().extras != null) {
@@ -46,7 +48,18 @@ public class AlertListener extends NotificationListenerService {
         String content = (title + " " + text).toLowerCase();
         Log.d(TAG, "Notification received: " + content);
 
-        SharedPreferences prefs = getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE);
+        // Check for debug trigger first
+        if (content.contains(DEBUG_TRIGGER_TEXT.toLowerCase())) {
+            Log.i(TAG, "Debug trigger detected! Launching standard flow.");
+            // Use the standard flow so it uses the same working URL format as real alerts
+            ShelterHelper.startNavigationFlow(this);
+            return;
+        }
+
+        String pkg = sbn.getPackageName();
+        if (!PIKUD_HAOREF_PACKAGES.contains(pkg)) return;
+
+        SharedPreferences prefs = getSharedPreferences(MainActivity.PREFS, Context.MODE_PRIVATE);
         int mode = prefs.getInt(MainActivity.MODE_KEY, MainActivity.MODE_OFF);
         if (mode == MainActivity.MODE_OFF) return;
 
