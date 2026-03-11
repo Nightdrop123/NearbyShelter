@@ -1,8 +1,8 @@
 package com.moko.nearbyshelter;
 
 import android.content.Context;
-import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.ApplicationInfo;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
 import android.util.Log;
@@ -33,13 +33,19 @@ public class AlertListener extends NotificationListenerService {
             "דיווח"
     };
 
-    // Debug trigger to test map opening without real alerts
+    // Debug trigger to test map opening without real alerts via messaging app.
     private static final String DEBUG_TRIGGER_TEXT = "debug_open_shelter";
 
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
         String title = "";
         String text = "";
+
+        if ((getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) == 0) {
+            String pkg = sbn.getPackageName();
+            if (!PIKUD_HAOREF_PACKAGES.contains(pkg)) return;
+        }
+
         if (sbn.getNotification().extras != null) {
             title = sbn.getNotification().extras.getCharSequence("android.title", "").toString();
             text = sbn.getNotification().extras.getCharSequence("android.text", "").toString();
@@ -48,16 +54,12 @@ public class AlertListener extends NotificationListenerService {
         String content = (title + " " + text).toLowerCase();
         Log.d(TAG, "Notification received: " + content);
 
-        // Check for debug trigger first
+        // Check for debug trigger first.
         if (content.contains(DEBUG_TRIGGER_TEXT.toLowerCase())) {
             Log.i(TAG, "Debug trigger detected! Launching standard flow.");
-            // Use the standard flow so it uses the same working URL format as real alerts
             ShelterHelper.startNavigationFlow(this);
             return;
         }
-
-        String pkg = sbn.getPackageName();
-        if (!PIKUD_HAOREF_PACKAGES.contains(pkg)) return;
 
         SharedPreferences prefs = getSharedPreferences(MainActivity.PREFS, Context.MODE_PRIVATE);
         int mode = prefs.getInt(MainActivity.MODE_KEY, MainActivity.MODE_OFF);

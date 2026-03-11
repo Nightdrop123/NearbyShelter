@@ -20,7 +20,7 @@ public class NavigationTrampolineActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // 1. Set window flags to wake up and show over lockscreen
+        // Set window flags to wake up and show over lockscreen
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true);
             setTurnScreenOn(true);
@@ -31,13 +31,13 @@ public class NavigationTrampolineActivity extends Activity {
                 | WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
                 | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
 
-        // 2. Dismiss keyguard if possible
+        // Dismiss keyguard if possible
         KeyguardManager km = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
         if (km != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             km.requestDismissKeyguard(this, null);
         }
 
-        // 3. Start checking for screen wakeup before launching navigation
+        // Start checking for screen wakeup before launching navigation
         checkScreenAndLaunch();
     }
 
